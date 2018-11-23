@@ -1768,7 +1768,18 @@ static NSObject *lock;
             uploadPart.uploadPartData = uploadPartData;
             uploadPart.contentMd5 = [OSSUtil base64Md5ForData:uploadPartData];
             uploadPart.crcFlag = request.crcFlag;
-            
+			
+			int64_t uploadingCount = *uploadedLength;
+			uploadPart.requestDelegate.uploadProgress = ^(int64_t bytesSent, int64_t totalBytesSent, int64_t totalBytesExpectedToSend) {
+				//NSLog(@"");
+				@synchronized(lock){
+					if (request.uploadingProgress)
+					{
+						request.uploadingProgress(bytesSent, uploadingCount + totalBytesSent, uploadFileSize);
+					}
+				}
+			};
+			
             OSSTask * uploadPartTask = [self uploadPart:uploadPart];
             [uploadPartTask waitUntilFinished];
             

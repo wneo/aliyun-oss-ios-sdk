@@ -1359,6 +1359,14 @@ The result class of listing uploaded parts.
  */
 @property (nonatomic, assign) NSUInteger partSize;
 
+
+/**
+ Upload progress callback @ doing.
+ It runs at the background thread (not UI thread).
+ */
+@property (nonatomic, copy) OSSNetworkingUploadProgressBlock uploadingProgress;
+
+
 /**
  Upload progress callback.
  It runs at the background thread (not UI thread).
