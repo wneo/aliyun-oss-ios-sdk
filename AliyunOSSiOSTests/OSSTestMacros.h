@@ -15,11 +15,14 @@
 #define OSS_BUCKET_PUBLIC               @"public"
 #define OSS_BUCKET_PRIVATE              @"private"
 #define OSS_ENDPOINT                    @"http://oss-cn-region.aliyuncs.com"
+#define OSS_IMG_ENDPOINT                @"http://img-cn-region.aliyuncs.com"
 #define OSS_MULTIPART_UPLOADKEY         @"multipart_key"
 #define OSS_RESUMABLE_UPLOADKEY         @"resumable_key"
 #define OSS_CALLBACK_URL                @"http://oss-demo.aliyuncs.com:23450"
 #define OSS_CNAME_URL                   @"http://www.cnametest.com/"
 #define OSS_STSTOKEN_URL                @"http://*.*.*.*:*/sts/getsts"
 #define OSS_IMAGE_KEY                   @"hasky.jpeg"
+
+#define OSS_DOWNLOAD_FILE_NAME          @"OSS_DOWNLOAD_FILE_NAME"
 
 #endif /* OSSTestMacros_h */

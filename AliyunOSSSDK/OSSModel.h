@@ -115,6 +115,7 @@ TODOTODO
 /**
  The STS token's credential provider.
  */
+__attribute__((deprecated("Please use OSSAuthCredentialProvider or its subClass instead!")))
 @interface OSSStsTokenCredentialProvider : NSObject <OSSCredentialProvider>
 @property (nonatomic, copy) NSString * accessKeyId;
 @property (nonatomic, copy) NSString * secretKeyId;
@@ -127,8 +128,19 @@ TODOTODO
 @end
 
 /**
- auth credential provider.
+ Auth credential provider require a STS INFO Server URL,also you can customize a decoder block which returns json data.
+ 
+ 
+ OSSAuthCredentialProvider *acp = [[OSSAuthCredentialProvider alloc] initWithAuthServerUrl:@"sts_server_url" responseDecoder:^NSData * (NSData * data) {
+        // 1.hanle response from server.
+ 
+ // 2.initialize json object from step 1. json object require message like {AccessKeyId:@"xxx",AccessKeySecret:@"xxx",SecurityToken:@"xxx",Expiration:@"xxx"}
+ 
+        // 3.generate jsonData from step 2 and return it.
+ }];
+ 
  */
+
 @interface OSSAuthCredentialProvider : OSSFederationCredentialProvider
 @property (nonatomic, copy) NSString * authServerUrl;
 @property (nonatomic, copy) NSData * (^responseDecoder)(NSData *);
@@ -551,6 +563,12 @@ Sets the session Id for background file transmission
  It runs under background thread (not UI thread)
  */
 @property (nonatomic, copy) OSSNetworkingOnRecieveDataBlock onRecieveData;
+
+/**
+ * set request headers
+ */
+@property (nonatomic, copy) NSDictionary *headerFields;
+
 @end
 
 /**

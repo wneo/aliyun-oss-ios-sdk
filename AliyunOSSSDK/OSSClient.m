@@ -15,6 +15,7 @@
 #import "OSSNetworking.h"
 #import "OSSXMLDictionary.h"
 #import "OSSReachabilityManager.h"
+#import "OSSIPv6Adapter.h"
 
 #import "OSSNetworkingRequestDelegate.h"
 #import "OSSAllRequestNeededMessage.h"
@@ -27,10 +28,13 @@
 #import "OSSGetSymlinkRequest.h"
 #import "OSSRestoreObjectRequest.h"
 
-static NSString * const oss_partInfos_storage_name = @"oss_partInfos_storage_name";
-static NSString * const oss_record_info_suffix_with_crc = @"-crc64";
-static NSString * const oss_record_info_suffix_with_sequential = @"-sequential";
-static NSUInteger const oss_multipart_max_part_number = 5000;   //max part number
+static NSString * const kClientRecordNameWithCommonPrefix = @"oss_partInfos_storage_name";
+static NSString * const kClientRecordNameWithCRC64Suffix = @"-crc64";
+static NSString * const kClientRecordNameWithSequentialSuffix = @"-sequential";
+static NSUInteger const kClientMaximumOfChunks = 5000;   //max part number
+
+static NSString * const kClientErrorMessageForEmptyFile = @"the length of file should not be 0!";
+static NSString * const kClientErrorMessageForCancelledTask = @"This task has been cancelled!";
 
 /**
  * extend OSSRequest to include the ref to networking request object
@@ -80,9 +84,24 @@ static NSObject *lock;
         // using for resumable upload and compat old interface
         queue.maxConcurrentOperationCount = 3;
         _ossOperationExecutor = [OSSExecutor executorWithOperationQueue:queue];
+        
+        if (![endpoint oss_isNotEmpty]) {
+            [NSException raise:NSInvalidArgumentException
+                        format:@"endpoint should not be nil or empty!"];
+        }
+        
         if ([endpoint rangeOfString:@"://"].location == NSNotFound) {
             endpoint = [@"https://" stringByAppendingString:endpoint];
         }
+        
+        NSURL *endpointURL = [NSURL URLWithString:endpoint];
+        if ([endpointURL.scheme.lowercaseString isEqualToString:@"https"]) {
+            if ([[OSSIPv6Adapter getInstance] isIPv4Address: endpointURL.host] || [[OSSIPv6Adapter getInstance] isIPv6Address: endpointURL.host]) {
+                [NSException raise:NSInvalidArgumentException
+                            format:@"unsupported format of endpoint, please use right endpoint format!"];
+            }
+        }
+        
         self.endpoint = [endpoint oss_trim];
         self.credentialProvider = credentialProvider;
         self.clientConfiguration = conf;
@@ -251,10 +270,10 @@ static NSObject *lock;
     BOOL divisible = (fileSize % request.partSize == 0);
     NSUInteger partCount = (fileSize / request.partSize) + (divisible? 0 : 1);
     
-    if(partCount > oss_multipart_max_part_number)
+    if(partCount > kClientMaximumOfChunks)
     {
-        request.partSize = fileSize / oss_multipart_max_part_number;
-        partCount = oss_multipart_max_part_number;
+        request.partSize = fileSize / kClientMaximumOfChunks;
+        partCount = kClientMaximumOfChunks;
     }
     return partCount;
 #pragma clang diagnostic pop
@@ -272,10 +291,10 @@ static NSObject *lock;
     NSString *uploadId = nil;
     NSString *record = [NSString stringWithFormat:@"%@%@%@%lu", request.md5String, request.bucketName, request.objectKey, (unsigned long)request.partSize];
     if (sequential) {
-        record = [record stringByAppendingString:oss_record_info_suffix_with_sequential];
+        record = [record stringByAppendingString:kClientRecordNameWithSequentialSuffix];
     }
     if (request.crcFlag == OSSRequestCRCOpen) {
-        record = [record stringByAppendingString:oss_record_info_suffix_with_crc];
+        record = [record stringByAppendingString:kClientRecordNameWithCRC64Suffix];
     }
     
     NSData *data = [record dataUsingEncoding:NSUTF8StringEncoding];
@@ -297,7 +316,7 @@ static NSObject *lock;
 - (NSMutableDictionary *)localPartInfosDictoryWithUploadId:(NSString *)uploadId
 {
     NSMutableDictionary *localPartInfoDict = nil;
-    NSString *partInfosDirectory = [[NSString oss_documentDirectory] stringByAppendingPathComponent:oss_partInfos_storage_name];
+    NSString *partInfosDirectory = [[NSString oss_documentDirectory] stringByAppendingPathComponent:kClientRecordNameWithCommonPrefix];
     NSString *partInfosPath = [partInfosDirectory stringByAppendingPathComponent:uploadId];
     BOOL isDirectory;
     NSFileManager *defaultFM = [NSFileManager defaultManager];
@@ -325,7 +344,7 @@ static NSObject *lock;
 
 - (OSSTask *)persistencePartInfos:(NSDictionary *)partInfos withUploadId:(NSString *)uploadId
 {
-    NSString *filePath = [[[NSString oss_documentDirectory] stringByAppendingPathComponent:oss_partInfos_storage_name] stringByAppendingPathComponent:uploadId];
+    NSString *filePath = [[[NSString oss_documentDirectory] stringByAppendingPathComponent:kClientRecordNameWithCommonPrefix] stringByAppendingPathComponent:uploadId];
     if (![partInfos writeToFile:filePath atomically:YES])
     {
         NSError *error = [NSError errorWithDomain:OSSClientErrorDomain
@@ -335,6 +354,30 @@ static NSObject *lock;
         return [OSSTask taskWithError:error];
     }
     return nil;
+}
+
+- (OSSTask *)checkPutObjectFileURL:(OSSPutObjectRequest *)request {
+    NSError *error = nil;
+    if (!request.uploadingFileURL || ![request.uploadingFileURL.path oss_isNotEmpty]) {
+        error = [NSError errorWithDomain:OSSClientErrorDomain
+                                    code:OSSClientErrorCodeInvalidArgument
+                                userInfo:@{OSSErrorMessageTOKEN: @"Please check your request's uploadingFileURL!"}];
+    } else {
+        NSFileManager *dfm = [NSFileManager defaultManager];
+        NSDictionary *attributes = [dfm attributesOfItemAtPath:request.uploadingFileURL.path error:&error];
+        unsigned long long fileSize = [attributes[NSFileSize] unsignedLongLongValue];
+        if (!error && fileSize == 0) {
+            error = [NSError errorWithDomain:OSSClientErrorDomain
+                                        code:OSSClientErrorCodeInvalidArgument
+                                    userInfo:@{OSSErrorMessageTOKEN: kClientErrorMessageForEmptyFile}];
+        }
+    }
+    
+    if (error) {
+        return [OSSTask taskWithError:error];
+    } else {
+        return [OSSTask taskWithResult:nil];
+    }
 }
 
 - (OSSTask *)checkFileSizeWithRequest:(OSSMultipartUploadRequest *)request {
@@ -352,7 +395,7 @@ static NSObject *lock;
         if (!error && fileSize == 0) {
             error = [NSError errorWithDomain:OSSClientErrorDomain
                                         code:OSSClientErrorCodeInvalidArgument
-                                    userInfo:@{OSSErrorMessageTOKEN: @"File length must not be 0!"}];
+                                    userInfo:@{OSSErrorMessageTOKEN: kClientErrorMessageForEmptyFile}];
         }
     }
     
@@ -369,7 +412,7 @@ static NSObject *lock;
     dispatch_once(&onceToken, ^{
         error = [NSError errorWithDomain:OSSClientErrorDomain
                                     code:OSSClientErrorCodeTaskCancelled
-                                userInfo:@{OSSErrorMessageTOKEN: @"This task has been cancelled!"}];
+                                userInfo:@{OSSErrorMessageTOKEN: kClientErrorMessageForCancelledTask}];
     });
     return error;
 }
@@ -529,6 +572,7 @@ static NSObject *lock;
     neededMsg.objectKey = request.objectKey;
     neededMsg.range = rangeString;
     neededMsg.params = params;
+    neededMsg.headerParams = request.headerFields;
     requestDelegate.allNeededMessage = neededMsg;
     
     requestDelegate.operType = OSSOperationTypeGetObject;
@@ -572,6 +616,10 @@ static NSObject *lock;
         }
     }
     if (request.uploadingFileURL) {
+        OSSTask *checkIfEmptyTask = [self checkPutObjectFileURL:request];
+        if (checkIfEmptyTask.error) {
+            return checkIfEmptyTask;
+        }
         requestDelegate.uploadingFileURL = request.uploadingFileURL;
     }
     
@@ -1026,17 +1074,17 @@ static NSObject *lock;
         OSSResumableUploadRequest *resumableRequest = (OSSResumableUploadRequest *)request;
         NSString *nameInfoString = [NSString stringWithFormat:@"%@%@%@%lu",request.md5String, resumableRequest.bucketName, resumableRequest.objectKey, (unsigned long)resumableRequest.partSize];
         if (sequential) {
-            nameInfoString = [nameInfoString stringByAppendingString:oss_record_info_suffix_with_sequential];
+            nameInfoString = [nameInfoString stringByAppendingString:kClientRecordNameWithSequentialSuffix];
         }
         if (request.crcFlag == OSSRequestCRCOpen) {
-            nameInfoString = [nameInfoString stringByAppendingString:oss_record_info_suffix_with_crc];
+            nameInfoString = [nameInfoString stringByAppendingString:kClientRecordNameWithCRC64Suffix];
         }
         
         NSData *data = [nameInfoString dataUsingEncoding:NSUTF8StringEncoding];
         NSString *recordFileName = [OSSUtil dataMD5String:data];
         NSString *recordFilePath = [NSString stringWithFormat:@"%@/%@",resumableRequest.recordDirectoryPath,recordFileName];
         NSFileManager *fileManager = [NSFileManager defaultManager];
-        NSString *partInfosFilePath = [[[NSString oss_documentDirectory] stringByAppendingPathComponent:oss_partInfos_storage_name] stringByAppendingPathComponent:resumableRequest.uploadId];
+        NSString *partInfosFilePath = [[[NSString oss_documentDirectory] stringByAppendingPathComponent:kClientRecordNameWithCommonPrefix] stringByAppendingPathComponent:resumableRequest.uploadId];
         
         if([fileManager fileExistsAtPath:recordFilePath])
         {
@@ -1180,7 +1228,7 @@ static NSObject *lock;
         {
             isTruncated = NO;
             [uploadedParts removeAllObjects];
-            if ([listPartsTask.error.domain isEqualToString: OSSServerErrorDomain] && listPartsTask.error.code == -404)
+            if ([listPartsTask.error.domain isEqualToString: OSSServerErrorDomain] && labs(listPartsTask.error.code) == 404)
             {
                 OSSLogVerbose(@"local record existes but the remote record is deleted");
                 *uploadId = nil;
@@ -1280,6 +1328,8 @@ static NSObject *lock;
     NSOperationQueue *queue = [[NSOperationQueue alloc] init];
     [queue setMaxConcurrentOperationCount: 5];
     
+    NSObject *localLock = [[NSObject alloc] init];
+    
     OSSRequestCRCFlag crcFlag = request.crcFlag;
     __block OSSTask *errorTask;
     __block NSMutableDictionary *localPartInfos = nil;
@@ -1300,6 +1350,7 @@ static NSObject *lock;
     
     NSData * uploadPartData;
     NSInteger realPartLength = request.partSize;
+    __block BOOL hasError = NO;
     
     for (NSUInteger idx = 1; idx <= partCout; idx++)
     {
@@ -1331,15 +1382,25 @@ static NSObject *lock;
             uploadPartData = [fileHande readDataOfLength:realPartLength];
             
             NSBlockOperation *operation = [NSBlockOperation blockOperationWithBlock:^{
-                @autoreleasepool {
-                    [self executePartUpload:request
-                   totalBytesExpectedToSend:uploadFileSize
-                             totalBytesSent:uploadedLength
-                                      index:idx
-                                   partData:uploadPartData
-                          alreadyUploadPart:alreadyUploadPart
-                                 localParts:localPartInfos
-                                  errorTask:&errorTask];
+                OSSTask *uploadPartErrorTask = nil;
+                
+                [self executePartUpload:request
+               totalBytesExpectedToSend:uploadFileSize
+                         totalBytesSent:uploadedLength
+                                  index:idx
+                               partData:uploadPartData
+                      alreadyUploadPart:alreadyUploadPart
+                             localParts:localPartInfos
+                              errorTask:&uploadPartErrorTask];
+                
+                if (uploadPartErrorTask != nil) {
+                    @synchronized(localLock) {
+                        if (!hasError) {
+                            hasError = YES;
+                            errorTask = uploadPartErrorTask;
+                        }
+                    }
+                    uploadPartErrorTask = nil;
                 }
             }];
             [queue addOperation:operation];
@@ -1347,6 +1408,8 @@ static NSObject *lock;
     }
     [fileHande closeFile];
     [queue waitUntilAllOperationsAreFinished];
+    
+    localLock = nil;
     
     if (!errorTask && request.isCancelled) {
         errorTask = [OSSTask taskWithError:[OSSClient cancelError]];
@@ -1374,7 +1437,7 @@ static NSObject *lock;
     OSSTask * uploadPartTask = [self uploadPart:uploadPart];
     [uploadPartTask waitUntilFinished];
     if (uploadPartTask.error) {
-        if (uploadPartTask.error.code != -409) {
+        if (labs(uploadPartTask.error.code) != 409) {
             *errorTask = uploadPartTask;
         }
     } else {
@@ -1491,7 +1554,7 @@ static NSObject *lock;
             
             if([uploadId oss_isNotEmpty])
             {
-                localPartInfosPath = [[[NSString oss_documentDirectory] stringByAppendingPathComponent:oss_partInfos_storage_name] stringByAppendingPathComponent:uploadId];
+                localPartInfosPath = [[[NSString oss_documentDirectory] stringByAppendingPathComponent:kClientRecordNameWithCommonPrefix] stringByAppendingPathComponent:uploadId];
                 
                 localPartInfos = [[NSDictionary alloc] initWithContentsOfFile:localPartInfosPath];
                 
@@ -1509,35 +1572,33 @@ static NSObject *lock;
             }
             
             [uploadedPart enumerateObjectsUsingBlock:^(NSDictionary *partInfo, NSUInteger idx, BOOL * _Nonnull stop) {
-                unsigned long long iPartNum = 0;
-                NSString *partNumberString = [partInfo objectForKey:OSSPartNumberXMLTOKEN];
-                NSScanner *scanner = [NSScanner scannerWithString:partNumberString];
-                [scanner scanUnsignedLongLong:&iPartNum];
+                unsigned long long remotePartNumber = 0;
+                NSString *partNumberString = [partInfo objectForKey: OSSPartNumberXMLTOKEN];
+                NSScanner *scanner = [NSScanner scannerWithString: partNumberString];
+                [scanner scanUnsignedLongLong: &remotePartNumber];
                 
-                unsigned long long iPartSize = 0;
+                NSString *remotePartEtag = [partInfo objectForKey:OSSETagXMLTOKEN];
+                
+                unsigned long long remotePartSize = 0;
                 NSString *partSizeString = [partInfo objectForKey:OSSSizeXMLTOKEN];
                 scanner = [NSScanner scannerWithString:partSizeString];
-                [scanner scanUnsignedLongLong:&iPartSize];
-                
-                NSString *eTag = [partInfo objectForKey:OSSETagXMLTOKEN];
+                [scanner scanUnsignedLongLong:&remotePartSize];
                 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wshorten-64-to-32"
                 
-                OSSPartInfo * info = [OSSPartInfo partInfoWithPartNum:iPartNum
-                                                                 eTag:eTag
-                                                                 size:iPartSize
-                                                                crc64:0];
-#pragma clang diagnostic pop
+                OSSPartInfo * info = [[OSSPartInfo alloc] init];
+                info.partNum = remotePartNumber;
+                info.size = remotePartSize;
+                info.eTag = remotePartEtag;
                 
-                NSDictionary *tPartInfo = [localPartInfos objectForKey:[NSString stringWithFormat:@"%llu",iPartNum]];
-                if (tPartInfo)
-                {
-                    info.crc64 = [tPartInfo[@"crc64"] unsignedLongLongValue];
-                }
+#pragma clang diagnostic pop
+            
+                NSDictionary *tPartInfo = [localPartInfos objectForKey: [@(remotePartNumber) stringValue]];
+                info.crc64 = [tPartInfo[@"crc64"] unsignedLongLongValue];
                 
                 [uploadedPartInfos addObject:info];
-                [alreadyUploadIndex addObject:@(info.partNum)];
+                [alreadyUploadIndex addObject:@(remotePartNumber)];
             }];
             
             if ([alreadyUploadIndex count] > 0 && request.uploadProgress && uploadFileSize) {
@@ -1565,6 +1626,8 @@ static NSObject *lock;
         }
         
         request.uploadId = uploadId;
+        localPartInfosPath = [[[NSString oss_documentDirectory] stringByAppendingPathComponent:kClientRecordNameWithCommonPrefix] stringByAppendingPathComponent:uploadId];
+        
         if (request.isCancelled)
         {
             if(resumable)
@@ -1653,7 +1716,6 @@ static NSObject *lock;
                      fileSize:(unsigned long long)uploadFileSize
 {
     OSSRequestCRCFlag crcFlag = request.crcFlag;
-    __block BOOL isCancel = NO;
     __block OSSTask *errorTask;
     __block NSMutableDictionary *localPartInfos = nil;
     
@@ -1671,91 +1733,94 @@ static NSObject *lock;
         return [OSSTask taskWithError: readError];
     }
     
-    NSData * uploadPartData;
     NSUInteger realPartLength = request.partSize;
     
     for (int i = 1; i <= partCout; i++) {
-        realPartLength = request.partSize;
-        if (isCancel) {
+        if (errorTask) {
+            break;
+        }
+        
+        if (request.isCancelled) {
             errorTask = [OSSTask taskWithError:[OSSClient cancelError]];
             break;
         }
+        
+        if ([alreadyUploadIndex containsObject:@(i)]) {
+            continue;
+        }
+        
         realPartLength = request.partSize;
-        @autoreleasepool{
-            //alreadyUploadIndex 为空 return false
-            if (alreadyUploadIndex && [alreadyUploadIndex containsObject:@(i)]) {
-                continue;
-            }
-            [fileHande seekToFileOffset:request.partSize * (i - 1)];
-            if (i == partCout) {
+        [fileHande seekToFileOffset:request.partSize * (i - 1)];
+        if (i == partCout) {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wshorten-64-to-32"
-                realPartLength = uploadFileSize - request.partSize * (i - 1);
+            realPartLength = uploadFileSize - request.partSize * (i - 1);
 #pragma clang diagnostic pop
-            }
-            uploadPartData = [fileHande readDataOfLength:realPartLength];
+        }
+        NSData *uploadPartData = [fileHande readDataOfLength:realPartLength];
+        
+        @autoreleasepool {
+            OSSUploadPartRequest * uploadPart = [OSSUploadPartRequest new];
+            uploadPart.bucketName = request.bucketName;
+            uploadPart.objectkey = request.objectKey;
+            uploadPart.partNumber = i;
+            uploadPart.uploadId = request.uploadId;
+            uploadPart.uploadPartData = uploadPartData;
+            uploadPart.contentMd5 = [OSSUtil base64Md5ForData:uploadPartData];
+            uploadPart.crcFlag = request.crcFlag;
             
-            if (request.isCancelled) {
-                @synchronized(lock){
-                    if(!isCancel){
-                        isCancel = YES;
-                    }
+            OSSTask * uploadPartTask = [self uploadPart:uploadPart];
+            [uploadPartTask waitUntilFinished];
+            
+            if (uploadPartTask.error) {
+                if (labs(uploadPartTask.error.code) != 409) {
+                    errorTask = uploadPartTask;
+                    break;
+                } else {
+                    NSDictionary *partDict = uploadPartTask.error.userInfo;
+                    OSSPartInfo *partInfo = [[OSSPartInfo alloc] init];
+                    partInfo.eTag = partDict[@"PartEtag"];
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wshorten-64-to-32"
+                    partInfo.partNum = [(NSString *)partDict[@"PartNumber"] integerValue];
+                    partInfo.size = realPartLength;
+#pragma clang diagnostic push
+                    partInfo.crc64 = [[uploadPartData mutableCopy] oss_crc64];
+
+                    [alreadyUploadPart addObject:partInfo];
                 }
             } else {
-                OSSUploadPartRequest * uploadPart = [OSSUploadPartRequest new];
-                uploadPart.bucketName = request.bucketName;
-                uploadPart.objectkey = request.objectKey;
-                uploadPart.partNumber = i;
-                uploadPart.uploadId = request.uploadId;
-                uploadPart.uploadPartData = uploadPartData;
-                uploadPart.contentMd5 = [OSSUtil base64Md5ForData:uploadPartData];
-                uploadPart.crcFlag = request.crcFlag;
+                OSSUploadPartResult * result = uploadPartTask.result;
+                OSSPartInfo * partInfo = [OSSPartInfo new];
+                partInfo.partNum = i;
+                partInfo.eTag = result.eTag;
+                partInfo.size = realPartLength;
+                uint64_t crc64OfPart;
+                @try {
+                    NSScanner *scanner = [NSScanner scannerWithString:result.remoteCRC64ecma];
+                    [scanner scanUnsignedLongLong:&crc64OfPart];
+                    partInfo.crc64 = crc64OfPart;
+                } @catch (NSException *exception) {
+                    OSSLogError(@"multipart upload error with nil remote crc64!");
+                }
                 
-                OSSTask * uploadPartTask = [self uploadPart:uploadPart];
-                [uploadPartTask waitUntilFinished];
-                if (uploadPartTask.error) {
-                    if (uploadPartTask.error.code != -409) {
-                        errorTask = uploadPartTask;
-                        break;
-                    }
-                } else {
-                    OSSUploadPartResult * result = uploadPartTask.result;
-                    OSSPartInfo * partInfo = [OSSPartInfo new];
-                    partInfo.partNum = i;
-                    partInfo.eTag = result.eTag;
-                    partInfo.size = realPartLength;
-                    uint64_t crc64OfPart;
-                    @try {
-                        NSScanner *scanner = [NSScanner scannerWithString:result.remoteCRC64ecma];
-                        [scanner scanUnsignedLongLong:&crc64OfPart];
-                        partInfo.crc64 = crc64OfPart;
-                    } @catch (NSException *exception) {
-                        OSSLogError(@"multipart upload error with nil remote crc64!");
-                    }
-                    
-                    @synchronized(lock){
-                        
-                        [alreadyUploadPart addObject:partInfo];
-                        
-                        if (crcFlag == OSSRequestCRCOpen)
-                        {
-                            [self processForLocalPartInfos:localPartInfos
-                                                  partInfo:partInfo
-                                                  uploadId:request.uploadId];
-                            [self persistencePartInfos:localPartInfos
-                                          withUploadId:request.uploadId];
-                        }
-                        *uploadedLength += realPartLength;
-                        if (request.uploadProgress)
-                        {
-                            request.uploadProgress(realPartLength, *uploadedLength, uploadFileSize);
-                        }
+                [alreadyUploadPart addObject:partInfo];
+                if (crcFlag == OSSRequestCRCOpen)
+                {
+                    [self processForLocalPartInfos:localPartInfos
+                                          partInfo:partInfo
+                                          uploadId:request.uploadId];
+                    [self persistencePartInfos:localPartInfos
+                                  withUploadId:request.uploadId];
+                }
+                
+                @synchronized(lock) {
+                    *uploadedLength += realPartLength;
+                    if (request.uploadProgress)
+                    {
+                        request.uploadProgress(realPartLength, *uploadedLength, uploadFileSize);
                     }
                 }
-            }
-            if (isCancel) {
-                errorTask = [OSSTask taskWithError:[OSSClient cancelError]];
-                break;
             }
         }
     }
@@ -1783,17 +1848,31 @@ static NSObject *lock;
                         withExpirationInterval:(NSTimeInterval)interval
                                 withParameters:(NSDictionary *)parameters {
     
+    return [self presignConstrainURLWithBucketName: bucketName
+                                     withObjectKey: objectKey
+                                        httpMethod: @"GET"
+                            withExpirationInterval: interval
+                                    withParameters: parameters];
+}
+
+- (OSSTask *)presignConstrainURLWithBucketName:(NSString *)bucketName
+                                 withObjectKey:(NSString *)objectKey
+                                    httpMethod:(NSString *)method
+                        withExpirationInterval:(NSTimeInterval)interval
+                                withParameters:(NSDictionary *)parameters
+{
     return [[OSSTask taskWithResult:nil] continueWithBlock:^id(OSSTask *task) {
         NSString * resource = [NSString stringWithFormat:@"/%@/%@", bucketName, objectKey];
         NSString * expires = [@((int64_t)[[NSDate oss_clockSkewFixedDate] timeIntervalSince1970] + interval) stringValue];
-        NSString * wholeSign = nil;
-        OSSFederationToken * token = nil;
-        NSError * error = nil;
-        NSMutableDictionary * params = [NSMutableDictionary new];
         
-        if (parameters) {
+        NSMutableDictionary * params = [NSMutableDictionary dictionary];
+        if (parameters.count > 0) {
             [params addEntriesFromDictionary:parameters];
         }
+        
+        NSString * wholeSign = nil;
+        OSSFederationToken *token = nil;
+        NSError *error = nil;
         
         if ([self.credentialProvider isKindOfClass:[OSSFederationCredentialProvider class]]) {
             token = [(OSSFederationCredentialProvider *)self.credentialProvider getToken:&error];
@@ -1809,14 +1888,14 @@ static NSObject *lock;
         {
             [params oss_setObject:token.tToken forKey:@"security-token"];
             resource = [NSString stringWithFormat:@"%@?%@", resource, [OSSUtil populateSubresourceStringFromParameter:params]];
-            NSString * string2sign = [NSString stringWithFormat:@"GET\n\n\n%@\n%@", expires, resource];
+            NSString * string2sign = [NSString stringWithFormat:@"%@\n\n\n%@\n%@", method, expires, resource];
             wholeSign = [OSSUtil sign:string2sign withToken:token];
         } else {
             NSString * subresource = [OSSUtil populateSubresourceStringFromParameter:params];
             if ([subresource length] > 0) {
                 resource = [NSString stringWithFormat:@"%@?%@", resource, [OSSUtil populateSubresourceStringFromParameter:params]];
             }
-            NSString * string2sign = [NSString stringWithFormat:@"GET\n\n\n%@\n%@", expires, resource];
+            NSString * string2sign = [NSString stringWithFormat:@"%@\n\n\n%@\n%@",  method, expires, resource];
             wholeSign = [self.credentialProvider sign:string2sign error:&error];
             if (error) {
                 return [OSSTask taskWithError:error];
@@ -1838,6 +1917,7 @@ static NSObject *lock;
         if ([OSSUtil isOssOriginBucketHost:host]) {
             host = [NSString stringWithFormat:@"%@.%@", bucketName, host];
         }
+        
         [params oss_setObject:signature forKey:@"Signature"];
         [params oss_setObject:accessKey forKey:@"OSSAccessKeyId"];
         [params oss_setObject:expires forKey:@"Expires"];
@@ -1902,7 +1982,7 @@ static NSObject *lock;
     if (!headError) {
         return YES;
     } else {
-        if ([headError.domain isEqualToString: OSSServerErrorDomain] && headError.code == -404) {
+        if ([headError.domain isEqualToString: OSSServerErrorDomain] && labs(headError.code) == 404) {
             return NO;
         } else {
             if (error != nil) {
