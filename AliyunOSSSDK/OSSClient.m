@@ -28,7 +28,7 @@
 #import "OSSGetSymlinkRequest.h"
 #import "OSSRestoreObjectRequest.h"
 
-static NSString * const kClientRecordNameWithCommonPrefix = @"oss_partInfos_storage_name";
+static NSString * const kClientRecordNameWithCommonPrefix = @".oss_partInfos_storage_name";
 static NSString * const kClientRecordNameWithCRC64Suffix = @"-crc64";
 static NSString * const kClientRecordNameWithSequentialSuffix = @"-sequential";
 static NSUInteger const kClientMaximumOfChunks = 5000;   //max part number
